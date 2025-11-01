@@ -34,12 +34,13 @@ def get_api_key():
     )
     return None, error_message
 
-def get_weather(city):
+def get_weather(city, units='imperial'):
     """
     Fetches weather data for a given city from the OpenWeatherMap API.
 
     Args:
         city (str): The name of the city.
+        units (str): The units for the temperature ('imperial' for F, 'metric' for C).
 
     Returns:
         dict: A dictionary containing weather data if the request is successful,
@@ -54,7 +55,7 @@ def get_weather(city):
     params = {
         'q': city,
         'appid': API_KEY,
-        'units': 'imperial'
+        'units': units
     }
     response = requests.get(BASE_URL, params=params)
     if response.status_code == 200:
