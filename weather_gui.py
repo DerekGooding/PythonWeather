@@ -8,6 +8,9 @@ from datetime import datetime
 import json
 from PIL import Image, ImageTk
 import requests
+import queue
+
+IMAGE_CACHE_DIR = ".image_cache"
 
 class WeatherApp(tk.Tk):
     def __init__(self):
@@ -34,6 +37,11 @@ class WeatherApp(tk.Tk):
         self.units_var = tk.StringVar(value=self.settings.get("units", "imperial"))
         self.current_city_display_var = tk.StringVar(value="Select a city or enter one above")
         self.status_var = tk.StringVar(value="Ready")
+        
+        self.data_queue = queue.Queue()
+        
+        if not os.path.exists(IMAGE_CACHE_DIR):
+            os.makedirs(IMAGE_CACHE_DIR)
 
         self.create_widgets()
         self.load_subscriptions()
@@ -146,9 +154,53 @@ class WeatherApp(tk.Tk):
 
     def display_weather(self, city):
         self.set_status(f"Fetching weather for {city}...")
-        units = self.units_var.get()
-        weather_data = weather_app.get_weather(city, units)
+        self.current_city_display_var.set(f"Loading {city}...")
+        self.temp_label.config(text="")
+        self.icon_label.config(image="")
+        self.clear_forecast()
+        self.clear_hourly_forecast()
         
+        thread = threading.Thread(target=self.fetch_weather_data_threaded, args=(city, self.units_var.get()), daemon=True)
+        thread.start()
+        self.after(100, self.check_data_queue)
+
+    def fetch_weather_data_threaded(self, city, units):
+        weather_data = weather_app.get_weather(city, units)
+        if weather_data and "error" not in weather_data:
+            lat = weather_data['coord']['lat']
+            lon = weather_data['coord']['lon']
+            forecast_data = weather_app.get_forecast(lat, lon, units)
+            self.data_queue.put((weather_data, forecast_data))
+        else:
+            self.data_queue.put((weather_data, None))
+
+    def check_data_queue(self):
+        try:
+            weather_data, forecast_data = self.data_queue.get_nowait()
+            self.process_weather_data(weather_data, forecast_data)
+        except queue.Empty:
+            self.after(100, self.check_data_queue)
+
+    def get_icon(self, icon_code, icon_url, size=None):
+        icon_path = os.path.join(IMAGE_CACHE_DIR, f"{icon_code}.png")
+        if os.path.exists(icon_path):
+            img = Image.open(icon_path)
+        else:
+            try:
+                image_data = requests.get(icon_url, stream=True).raw
+                img = Image.open(image_data)
+                img.save(icon_path)
+            except Exception as e:
+                self.set_status(f"Error loading icon: {e}")
+                return None
+        
+        if size:
+            img = img.resize(size)
+        
+        return ImageTk.PhotoImage(img)
+
+    def process_weather_data(self, weather_data, forecast_data):
+        units = self.units_var.get()
         self.weather_display.config(state=tk.NORMAL)
         self.weather_display.delete(1.0, tk.END)
         
@@ -160,15 +212,10 @@ class WeatherApp(tk.Tk):
             icon_code = weather_data['weather'][0]['icon']
             icon_url = f"https://openweathermap.org/img/wn/{icon_code}@2x.png"
             
-            try:
-                image_data = requests.get(icon_url, stream=True).raw
-                img = Image.open(image_data)
-                photo = ImageTk.PhotoImage(img)
+            photo = self.get_icon(icon_code, icon_url)
+            if photo:
                 self.icon_label.config(image=photo)
                 self.icon_label.image = photo # Keep a reference
-            except Exception as e:
-                self.set_status(f"Error loading weather icon: {e}")
-                self.icon_label.config(image="")
 
             self.weather_display.insert(tk.END, self.format_weather_data(weather_data, temp_unit))
             
@@ -176,9 +223,6 @@ class WeatherApp(tk.Tk):
             self.fade_in(self.temp_label, self.fg_color)
             self.fade_in(self.weather_display, self.fg_color)
             
-            lat = weather_data['coord']['lat']
-            lon = weather_data['coord']['lon']
-            forecast_data = weather_app.get_forecast(lat, lon, units)
             self.display_forecast(forecast_data)
             self.display_hourly_forecast(forecast_data)
             self.set_status("Weather updated")
@@ -199,7 +243,7 @@ class WeatherApp(tk.Tk):
             self.icon_label.config(image="")
             self.clear_forecast()
             self.clear_hourly_forecast()
-            self.set_status(f"Could not retrieve weather for {city}")
+            self.set_status(f"Could not retrieve weather for {weather_data['name'] if weather_data else 'city'}")
             
         self.weather_display.config(state=tk.DISABLED)
 
@@ -217,15 +261,11 @@ class WeatherApp(tk.Tk):
 
                 icon_code = day['weather'][0]['icon']
                 icon_url = f"https://openweathermap.org/img/wn/{icon_code}.png"
-                try:
-                    image_data = requests.get(icon_url, stream=True).raw
-                    img = Image.open(image_data).resize((40, 40))
-                    photo = ImageTk.PhotoImage(img)
+                photo = self.get_icon(icon_code, icon_url, (40, 40))
+                if photo:
                     icon_label = tk.Label(day_frame, image=photo, bg=self.text_bg_color)
                     icon_label.image = photo
                     icon_label.pack(side=tk.LEFT, padx=5)
-                except Exception as e:
-                    self.set_status(f"Error loading forecast icon: {e}")
 
                 temp_label = tk.Label(day_frame, text=f"{day['temp']['max']:.0f}° / {day['temp']['min']:.0f}°", font=self.forecast_temp_font, bg=self.text_bg_color, fg=self.bg_color)
                 temp_label.pack(side=tk.RIGHT, padx=5)
@@ -250,15 +290,11 @@ class WeatherApp(tk.Tk):
 
                 icon_code = hour['weather'][0]['icon']
                 icon_url = f"https://openweathermap.org/img/wn/{icon_code}.png"
-                try:
-                    image_data = requests.get(icon_url, stream=True).raw
-                    img = Image.open(image_data).resize((30, 30))
-                    photo = ImageTk.PhotoImage(img)
+                photo = self.get_icon(icon_code, icon_url, (30, 30))
+                if photo:
                     icon_label = tk.Label(hour_frame, image=photo, bg=self.text_bg_color)
                     icon_label.image = photo
                     icon_label.pack()
-                except Exception as e:
-                    self.set_status(f"Error loading hourly forecast icon: {e}")
 
                 temp_label = tk.Label(hour_frame, text=f"{hour['temp']:.0f}°", font=self.hourly_forecast_font, bg=self.text_bg_color, fg=self.bg_color)
                 temp_label.pack()
