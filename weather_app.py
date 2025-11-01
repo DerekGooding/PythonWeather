@@ -1,5 +1,10 @@
 import requests
 import os
+import json
+import time
+
+CACHE_DIR = ".cache"
+CACHE_EXPIRATION = 600  # 10 minutes
 
 def get_api_key():
     """
@@ -34,6 +39,46 @@ def get_api_key():
     )
     return None, error_message
 
+def get_cached_data(cache_key):
+    """
+    Gets data from the cache if it exists and is not expired.
+
+    Args:
+        cache_key (str): The key for the cached data.
+
+    Returns:
+        dict: The cached data if found and valid, otherwise None.
+    """
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+    cache_file = os.path.join(CACHE_DIR, cache_key)
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as f:
+            try:
+                data = json.load(f)
+                if time.time() - data.get("timestamp", 0) < CACHE_EXPIRATION:
+                    return data.get("payload")
+            except json.JSONDecodeError:
+                return None
+    return None
+
+def save_cached_data(cache_key, data):
+    """
+    Saves data to the cache.
+
+    Args:
+        cache_key (str): The key for the cached data.
+        data (dict): The data to be cached.
+    """
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+    cache_file = os.path.join(CACHE_DIR, cache_key)
+    with open(cache_file, 'w') as f:
+        json.dump({"timestamp": time.time(), "payload": data}, f)
+
+
 def get_weather(city, units='imperial'):
     """
     Fetches weather data for a given city from the OpenWeatherMap API.
@@ -46,6 +91,11 @@ def get_weather(city, units='imperial'):
         dict: A dictionary containing weather data if the request is successful,
               otherwise an error dictionary.
     """
+    cache_key = f"weather_{city.lower()}_{units}.json"
+    cached_data = get_cached_data(cache_key)
+    if cached_data:
+        return cached_data
+
     API_KEY, error = get_api_key()
     if error:
         return {"error": error}
@@ -59,6 +109,47 @@ def get_weather(city, units='imperial'):
     }
     response = requests.get(BASE_URL, params=params)
     if response.status_code == 200:
-        return response.json()
+        data = response.json()
+        save_cached_data(cache_key, data)
+        return data
     else:
         return {"error": f"Unable to fetch weather data for {city}. Status code: {response.status_code}"}
+
+def get_forecast(lat, lon, units='imperial'):
+    """
+    Fetches 7-day forecast data for a given latitude and longitude.
+
+    Args:
+        lat (float): Latitude.
+        lon (float): Longitude.
+        units (str): The units for the temperature ('imperial' for F, 'metric' for C).
+
+    Returns:
+        dict: A dictionary containing forecast data if the request is successful,
+              otherwise an error dictionary.
+    """
+    cache_key = f"forecast_{lat}_{lon}_{units}.json"
+    cached_data = get_cached_data(cache_key)
+    if cached_data:
+        return cached_data
+
+    API_KEY, error = get_api_key()
+    if error:
+        return {"error": error}
+
+    BASE_URL = 'https://api.openweathermap.org/data/3.0/onecall'
+    
+    params = {
+        'lat': lat,
+        'lon': lon,
+        'exclude': 'current,minutely,alerts',
+        'appid': API_KEY,
+        'units': units
+    }
+    response = requests.get(BASE_URL, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        save_cached_data(cache_key, data)
+        return data
+    else:
+        return {"error": f"Unable to fetch forecast data. Status code: {response.status_code}"}
